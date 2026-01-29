@@ -111,3 +111,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run benchmarks (compile check)
         run: cargo bench --no-run
+
+  deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v1
+
+  doc-coverage:
+    name: Documentation Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Check documentation coverage
+        run: RUSTDOCFLAGS="-Z unstable-options --check" cargo +nightly doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings -W missing_docs

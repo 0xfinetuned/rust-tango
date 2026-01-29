@@ -1,5 +1,11 @@
 # tango
 
+[![Crates.io](https://img.shields.io/crates/v/tango.svg)](https://crates.io/crates/tango)
+[![Documentation](https://docs.rs/tango/badge.svg)](https://docs.rs/tango)
+[![CI](https://github.com/0xfinetuned/rust-tango/actions/workflows/ci.yml/badge.svg)](https://github.com/0xfinetuned/rust-tango/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/tango.svg)](https://github.com/0xfinetuned/rust-tango#license)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://github.com/0xfinetuned/rust-tango)
+
 A lock-free, high-performance SPSC (single-producer single-consumer) channel inspired by [Firedancer's Tango](https://github.com/firedancer-io/firedancer) IPC subsystem.
 
 ## Performance
