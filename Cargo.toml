@@ -2,14 +2,34 @@
 name = "tango"
 version = "0.1.0"
 edition = "2024"
+description = "A lock-free, high-performance IPC channel inspired by Firedancer's Tango"
+license = "MIT OR Apache-2.0"
+keywords = ["lock-free", "channel", "ipc", "spsc", "zero-copy"]
+categories = ["concurrency", "data-structures", "no-std"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[features]
+default = ["std"]
+std = []
+loom = ["dep:loom"]
 
 [dependencies]
-thiserror = "2.0.18"
+thiserror = { version = "2.0.18", optional = true }
+loom = { version = "0.7", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 crossbeam-channel = "0.5"
+ringbuf = "0.4"
+loom = "0.7"
 
 [[bench]]
 name = "channel_comparison"
 harness = false
+
+[[test]]
+name = "loom"
+path = "tests/loom.rs"
+required-features = ["loom"]

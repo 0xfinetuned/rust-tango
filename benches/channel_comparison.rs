@@ -1,8 +1,9 @@
-//! Benchmark comparing Tango channels with std::sync::mpsc and crossbeam-channel.
+//! Benchmark comparing Tango channels with std::sync::mpsc, crossbeam-channel, and ringbuf.
 //!
 //! Run with: cargo bench
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use ringbuf::traits::{Consumer as RingConsumer, Producer as RingProducer, Split};
 use std::sync::mpsc;
 use std::thread;
 
@@ -158,6 +159,40 @@ fn bench_spsc_throughput(c: &mut Criterion) {
         });
     });
 
+    // ringbuf SPSC
+    group.bench_function("ringbuf", |b| {
+        b.iter(|| {
+            let payload = payload.clone();
+            let rb = ringbuf::HeapRb::<Vec<u8>>::new(1024);
+            let (mut prod, mut cons) = rb.split();
+
+            thread::scope(|s| {
+                let sender = s.spawn(move || {
+                    for _ in 0..MSG_COUNT {
+                        while prod.try_push(payload.clone()).is_err() {
+                            std::hint::spin_loop();
+                        }
+                    }
+                });
+
+                let receiver = s.spawn(move || {
+                    let mut received = 0u64;
+                    while received < MSG_COUNT {
+                        if let Some(v) = cons.try_pop() {
+                            black_box(v);
+                            received += 1;
+                        } else {
+                            std::hint::spin_loop();
+                        }
+                    }
+                });
+
+                sender.join().unwrap();
+                receiver.join().unwrap();
+            });
+        });
+    });
+
     group.finish();
 }
 
@@ -233,6 +268,39 @@ fn bench_payload_sizes(c: &mut Criterion) {
                 });
             },
         );
+
+        group.bench_with_input(BenchmarkId::new("ringbuf", size), size, |b, &size| {
+            b.iter(|| {
+                let payload = vec![0u8; size];
+                let rb = ringbuf::HeapRb::<Vec<u8>>::new(1024);
+                let (mut prod, mut cons) = rb.split();
+
+                thread::scope(|s| {
+                    let sender = s.spawn(move || {
+                        for _ in 0..PAYLOAD_MSG_COUNT {
+                            while prod.try_push(payload.clone()).is_err() {
+                                std::hint::spin_loop();
+                            }
+                        }
+                    });
+
+                    let receiver = s.spawn(move || {
+                        let mut received = 0u64;
+                        while received < PAYLOAD_MSG_COUNT {
+                            if let Some(v) = cons.try_pop() {
+                                black_box(v);
+                                received += 1;
+                            } else {
+                                std::hint::spin_loop();
+                            }
+                        }
+                    });
+
+                    sender.join().unwrap();
+                    receiver.join().unwrap();
+                });
+            });
+        });
     }
 
     group.finish();
@@ -292,6 +360,22 @@ fn bench_single_thread_overhead(c: &mut Criterion) {
 
             for _ in 0..MSG_COUNT {
                 black_box(rx.recv().unwrap());
+            }
+        });
+    });
+
+    // ringbuf - single thread
+    group.bench_function("ringbuf", |b| {
+        b.iter(|| {
+            let rb = ringbuf::HeapRb::<Vec<u8>>::new(MSG_COUNT as usize);
+            let (mut prod, mut cons) = rb.split();
+
+            for _ in 0..MSG_COUNT {
+                prod.try_push(payload.clone()).unwrap();
+            }
+
+            for _ in 0..MSG_COUNT {
+                black_box(cons.try_pop().unwrap());
             }
         });
     });
@@ -400,6 +484,54 @@ fn bench_latency(c: &mut Criterion) {
                     for _ in 0..100 {
                         black_box(rx_a.recv().unwrap());
                         tx_b.send(payload_b.clone()).unwrap();
+                    }
+                });
+
+                thread_a.join().unwrap();
+                thread_b.join().unwrap();
+            });
+        });
+    });
+
+    // ringbuf ping-pong (uses two ring buffers for bidirectional communication)
+    group.bench_function("ringbuf", |b| {
+        b.iter(|| {
+            let rb_a = ringbuf::HeapRb::<Vec<u8>>::new(1);
+            let rb_b = ringbuf::HeapRb::<Vec<u8>>::new(1);
+            let (mut prod_a, mut cons_a) = rb_a.split();
+            let (mut prod_b, mut cons_b) = rb_b.split();
+
+            let payload_a = payload.clone();
+            let payload_b = payload.clone();
+
+            thread::scope(|s| {
+                let thread_a = s.spawn(move || {
+                    for _ in 0..100 {
+                        while prod_a.try_push(payload_a.clone()).is_err() {
+                            std::hint::spin_loop();
+                        }
+                        loop {
+                            if let Some(v) = cons_b.try_pop() {
+                                black_box(v);
+                                break;
+                            }
+                            std::hint::spin_loop();
+                        }
+                    }
+                });
+
+                let thread_b = s.spawn(move || {
+                    for _ in 0..100 {
+                        loop {
+                            if let Some(v) = cons_a.try_pop() {
+                                black_box(v);
+                                break;
+                            }
+                            std::hint::spin_loop();
+                        }
+                        while prod_b.try_push(payload_b.clone()).is_err() {
+                            std::hint::spin_loop();
+                        }
                     }
                 });
 

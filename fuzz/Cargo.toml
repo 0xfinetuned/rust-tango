@@ -1,0 +1,36 @@
+[package]
+name = "tango-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.tango]
+path = ".."
+
+[[bin]]
+name = "fuzz_publish_consume"
+path = "fuzz_targets/fuzz_publish_consume.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_flow_control"
+path = "fuzz_targets/fuzz_flow_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mcache"
+path = "fuzz_targets/fuzz_mcache.rs"
+test = false
+doc = false
+bench = false
