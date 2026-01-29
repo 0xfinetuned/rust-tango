@@ -107,6 +107,104 @@ pub enum ReadResult<T> {
     Overrun,
 }
 
+/// Metrics for observability and monitoring.
+///
+/// All counters are atomically updated and can be read from any thread.
+/// Use `snapshot()` to get a consistent point-in-time view.
+#[derive(Debug)]
+pub struct Metrics {
+    /// Total messages published.
+    published: AtomicU64,
+    /// Total messages consumed.
+    consumed: AtomicU64,
+    /// Total overruns detected (consumer was lapped).
+    overruns: AtomicU64,
+    /// Total times producer was blocked due to no credits.
+    backpressure_events: AtomicU64,
+}
+
+/// A point-in-time snapshot of metrics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetricsSnapshot {
+    /// Total messages published.
+    pub published: u64,
+    /// Total messages consumed.
+    pub consumed: u64,
+    /// Total overruns detected.
+    pub overruns: u64,
+    /// Total backpressure events.
+    pub backpressure_events: u64,
+}
+
+impl MetricsSnapshot {
+    /// Returns the current consumer lag (published - consumed).
+    #[inline]
+    pub fn lag(&self) -> u64 {
+        self.published.saturating_sub(self.consumed)
+    }
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Metrics {
+    /// Create a new metrics instance with all counters at zero.
+    pub fn new() -> Self {
+        Self {
+            published: AtomicU64::new(0),
+            consumed: AtomicU64::new(0),
+            overruns: AtomicU64::new(0),
+            backpressure_events: AtomicU64::new(0),
+        }
+    }
+
+    /// Record a published message.
+    #[inline]
+    pub fn record_publish(&self) {
+        self.published.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a consumed message.
+    #[inline]
+    pub fn record_consume(&self) {
+        self.consumed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record an overrun event.
+    #[inline]
+    pub fn record_overrun(&self) {
+        self.overruns.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a backpressure event (producer blocked on credits).
+    #[inline]
+    pub fn record_backpressure(&self) {
+        self.backpressure_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get a consistent snapshot of all metrics.
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        // Use Acquire to ensure we see all prior increments
+        MetricsSnapshot {
+            published: self.published.load(Ordering::Acquire),
+            consumed: self.consumed.load(Ordering::Acquire),
+            overruns: self.overruns.load(Ordering::Acquire),
+            backpressure_events: self.backpressure_events.load(Ordering::Acquire),
+        }
+    }
+
+    /// Reset all counters to zero.
+    pub fn reset(&self) {
+        self.published.store(0, Ordering::Release);
+        self.consumed.store(0, Ordering::Release);
+        self.overruns.store(0, Ordering::Release);
+        self.backpressure_events.store(0, Ordering::Release);
+    }
+}
+
 /// Command-and-control state for coordinating threads.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CncState {
@@ -433,14 +531,45 @@ pub struct DcacheView<'a, const CHUNK_SIZE: usize> {
 }
 
 impl<'a, const CHUNK_SIZE: usize> DcacheView<'a, CHUNK_SIZE> {
-    pub fn read(&self) -> Vec<u8> {
+    /// Zero-copy access to the payload bytes.
+    ///
+    /// # Safety
+    /// This is safe because the DcacheView can only be obtained through
+    /// Consumer::poll() or Consumer::wait(), which validate via the MCache
+    /// sequence protocol that the data has been fully written (Release/Acquire).
+    #[inline]
+    pub fn as_slice(&self) -> &'a [u8] {
+        // SAFETY: The Acquire load in MCache::try_read synchronizes with
+        // the Release store in MCache::publish, ensuring the payload write
+        // in DCache::write_chunk is visible to us.
         let data = unsafe { &*self.chunk.data.get() };
-        data[..self.size].to_vec()
+        &data[..self.size]
     }
 
+    /// Copy the payload into a new Vec.
+    ///
+    /// Prefer `as_slice()` for zero-copy access when possible.
+    pub fn read(&self) -> Vec<u8> {
+        self.as_slice().to_vec()
+    }
+
+    /// Access the payload through a closure.
+    ///
+    /// Prefer `as_slice()` for direct zero-copy access.
     pub fn with_reader<T>(&self, f: impl FnOnce(&[u8]) -> T) -> T {
-        let data = unsafe { &*self.chunk.data.get() };
-        f(&data[..self.size])
+        f(self.as_slice())
+    }
+
+    /// Returns the size of the payload in bytes.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.size
+    }
+
+    /// Returns true if the payload is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
     }
 }
 
@@ -538,6 +667,7 @@ pub struct Producer<
     dcache: &'a DCache<CHUNK_COUNT, CHUNK_SIZE>,
     fseq: &'a Fseq,
     fctl: Option<&'a Fctl>,
+    metrics: Option<&'a Metrics>,
 }
 
 impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: usize> fmt::Debug
@@ -546,6 +676,7 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Producer")
             .field("has_flow_control", &self.fctl.is_some())
+            .field("has_metrics", &self.metrics.is_some())
             .finish()
     }
 }
@@ -567,6 +698,7 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
             dcache,
             fseq,
             fctl: None,
+            metrics: None,
         }
     }
 
@@ -585,7 +717,16 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
             dcache,
             fseq,
             fctl: Some(fctl),
+            metrics: None,
         }
+    }
+
+    /// Attach metrics tracking to this producer.
+    ///
+    /// Returns a new producer with the same configuration plus metrics.
+    pub fn with_metrics(mut self, metrics: &'a Metrics) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Publish a payload fragment and its metadata.
@@ -602,6 +743,9 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
         // Acquire credit if flow control is enabled
         if let Some(fctl) = self.fctl {
             if !fctl.acquire(1) {
+                if let Some(metrics) = self.metrics {
+                    metrics.record_backpressure();
+                }
                 return Err(TangoError::NoCredits);
             }
         }
@@ -619,6 +763,11 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
             ts,
         };
         self.mcache.publish(meta);
+
+        if let Some(metrics) = self.metrics {
+            metrics.record_publish();
+        }
+
         Ok(meta)
     }
 
@@ -662,6 +811,7 @@ pub struct Consumer<
     mcache: &'a MCache<MCACHE_DEPTH>,
     dcache: &'a DCache<CHUNK_COUNT, CHUNK_SIZE>,
     fctl: Option<&'a Fctl>,
+    metrics: Option<&'a Metrics>,
     next_seq: u64,
 }
 
@@ -672,6 +822,7 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
         f.debug_struct("Consumer")
             .field("next_seq", &self.next_seq)
             .field("has_flow_control", &self.fctl.is_some())
+            .field("has_metrics", &self.metrics.is_some())
             .finish()
     }
 }
@@ -689,6 +840,7 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
             mcache,
             dcache,
             fctl: None,
+            metrics: None,
             next_seq: initial_seq,
         }
     }
@@ -707,8 +859,17 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
             mcache,
             dcache,
             fctl: Some(fctl),
+            metrics: None,
             next_seq: initial_seq,
         }
+    }
+
+    /// Attach metrics tracking to this consumer.
+    ///
+    /// Returns a new consumer with the same configuration plus metrics.
+    pub fn with_metrics(mut self, metrics: &'a Metrics) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Poll for the next fragment without blocking.
@@ -729,10 +890,19 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
                     fctl.release(1);
                 }
 
+                if let Some(metrics) = self.metrics {
+                    metrics.record_consume();
+                }
+
                 Ok(Some(Fragment { meta, payload }))
             }
             ReadResult::NotReady => Ok(None),
-            ReadResult::Overrun => Err(TangoError::Overrun),
+            ReadResult::Overrun => {
+                if let Some(metrics) = self.metrics {
+                    metrics.record_overrun();
+                }
+                Err(TangoError::Overrun)
+            }
         }
     }
 
@@ -754,10 +924,19 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
                     fctl.release(1);
                 }
 
+                if let Some(metrics) = self.metrics {
+                    metrics.record_consume();
+                }
+
                 Ok(Some(Fragment { meta, payload }))
             }
             ReadResult::NotReady => Ok(None),
-            ReadResult::Overrun => Err(TangoError::Overrun),
+            ReadResult::Overrun => {
+                if let Some(metrics) = self.metrics {
+                    metrics.record_overrun();
+                }
+                Err(TangoError::Overrun)
+            }
         }
     }
 
@@ -936,5 +1115,78 @@ mod tests {
         });
 
         assert_eq!(received.load(Ordering::Acquire), 100);
+    }
+
+    #[test]
+    fn metrics_tracking() {
+        let mcache = MCache::<8>::new();
+        let dcache = DCache::<16, 64>::new();
+        let fseq = Fseq::new(1);
+        let fctl = Fctl::new(8);
+        let metrics = Metrics::new();
+
+        let producer = Producer::with_flow_control(&mcache, &dcache, &fseq, &fctl)
+            .with_metrics(&metrics);
+        let mut consumer = Consumer::with_flow_control(&mcache, &dcache, &fctl, 1)
+            .with_metrics(&metrics);
+
+        // Publish 5 messages
+        for i in 0..5 {
+            producer.publish(b"test", i, 0, 0).expect("publish");
+        }
+
+        // Consume 3 messages
+        for _ in 0..3 {
+            consumer.poll().expect("poll").expect("fragment");
+        }
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.published, 5);
+        assert_eq!(snapshot.consumed, 3);
+        assert_eq!(snapshot.lag(), 2);
+        assert_eq!(snapshot.overruns, 0);
+        assert_eq!(snapshot.backpressure_events, 0);
+    }
+
+    #[test]
+    fn metrics_backpressure_tracking() {
+        let mcache = MCache::<8>::new();
+        let dcache = DCache::<8, 64>::new();
+        let fseq = Fseq::new(1);
+        let fctl = Fctl::new(2); // Only 2 credits
+        let metrics = Metrics::new();
+
+        let producer = Producer::with_flow_control(&mcache, &dcache, &fseq, &fctl)
+            .with_metrics(&metrics);
+
+        // Publish 2 messages (uses all credits)
+        producer.publish(b"1", 1, 0, 0).expect("first");
+        producer.publish(b"2", 2, 0, 0).expect("second");
+
+        // Third publish should fail and record backpressure
+        assert!(producer.publish(b"3", 3, 0, 0).is_err());
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.published, 2);
+        assert_eq!(snapshot.backpressure_events, 1);
+    }
+
+    #[test]
+    fn zero_copy_read() {
+        let mcache = MCache::<8>::new();
+        let dcache = DCache::<8, 64>::new();
+        let fseq = Fseq::new(1);
+        let producer = Producer::new(&mcache, &dcache, &fseq);
+        let mut consumer = Consumer::new(&mcache, &dcache, 1);
+
+        producer.publish(b"hello world", 42, 0, 0).expect("publish");
+
+        let fragment = consumer.poll().expect("poll").expect("fragment");
+
+        // Zero-copy access
+        let slice = fragment.payload.as_slice();
+        assert_eq!(slice, b"hello world");
+        assert_eq!(fragment.payload.len(), 11);
+        assert!(!fragment.payload.is_empty());
     }
 }
