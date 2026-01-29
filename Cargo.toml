@@ -9,6 +9,7 @@ repository = "https://github.com/0xfinetuned/rust-tango"
 homepage = "https://github.com/0xfinetuned/rust-tango"
 documentation = "https://docs.rs/rust-tango"
 readme = "README.md"
+exclude = ["Cargo.lock"]
 keywords = ["lock-free", "channel", "ipc", "spsc", "zero-copy"]
 categories = ["concurrency", "data-structures", "no-std"]
 
