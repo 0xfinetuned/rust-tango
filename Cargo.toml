@@ -2,6 +2,7 @@
 name = "tango"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "A lock-free, high-performance IPC channel inspired by Firedancer's Tango"
 license = "MIT OR Apache-2.0"
 keywords = ["lock-free", "channel", "ipc", "spsc", "zero-copy"]
@@ -24,6 +25,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 crossbeam-channel = "0.5"
 ringbuf = "0.4"
 loom = "0.7"
+proptest = "1.5"
 
 [[bench]]
 name = "channel_comparison"

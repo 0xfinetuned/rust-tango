@@ -89,10 +89,13 @@
 //!
 //! # Performance Characteristics
 //!
-//! | Scenario | Tango | std::sync::mpsc | crossbeam |
-//! |----------|-------|-----------------|-----------|
-//! | SPSC throughput | ~30M msg/s | ~11M msg/s | ~6M msg/s |
-//! | Ping-pong latency | ~12µs | ~234µs | ~127µs |
+//! Benchmarked on Apple M3 Pro (10K messages, 64-byte payload):
+//!
+//! | Scenario | Tango | std | crossbeam | ringbuf |
+//! |----------|-------|-----|-----------|---------|
+//! | SPSC throughput | **28.7M msg/s** | 11.5M msg/s | 7.2M msg/s | 10.7M msg/s |
+//! | Ping-pong latency (100 trips) | **88 µs** | 388 µs | 123 µs | 100 µs |
+//! | Large payload (1KB) | **12.6 GiB/s** | - | 6.6 GiB/s | 9.2 GiB/s |
 //!
 //! Best suited for:
 //! - Single-producer single-consumer scenarios
@@ -164,6 +167,7 @@ impl fmt::Display for FragmentMetadata {
 
 /// Errors that can occur during tango operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "this error should be handled"]
 pub enum TangoError {
     /// The DCache has no more chunks available (only without flow control).
     DcacheFull,
@@ -191,6 +195,7 @@ impl std::error::Error for TangoError {}
 
 /// Result of attempting to read from the MCache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "this `ReadResult` may contain data that should be handled"]
 pub enum ReadResult<T> {
     /// Successfully read the data.
     Ok(T),
@@ -257,6 +262,7 @@ pub struct Metrics {
 
 /// A point-in-time snapshot of metrics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use = "this snapshot contains metrics data that should be used"]
 pub struct MetricsSnapshot {
     /// Total messages published.
     pub published: u64,
@@ -439,6 +445,7 @@ impl Fctl {
         }
     }
 
+    #[must_use = "returns whether the credits were successfully acquired"]
     pub fn acquire(&self, amount: u64) -> bool {
         let mut current = self.credits.load(Ordering::Acquire);
         loop {
@@ -918,6 +925,7 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
     ///
     /// If flow control is enabled, returns `TangoError::NoCredits` when
     /// no credits are available (consumer hasn't caught up).
+    #[must_use = "publishing may fail; check the result"]
     pub fn publish(
         &self,
         payload: &[u8],
@@ -959,6 +967,7 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
     /// Try to publish, spinning until credits are available or mcache stops.
     ///
     /// Only useful when flow control is enabled.
+    #[must_use = "publishing may fail; check the result"]
     pub fn publish_blocking(
         &self,
         payload: &[u8],
@@ -1081,6 +1090,7 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
     /// - `Ok(Some(fragment))` if a fragment was available
     /// - `Ok(None)` if the sequence is not ready yet
     /// - `Err(TangoError::Overrun)` if the consumer was lapped
+    #[must_use = "polling may return data or an error; check the result"]
     pub fn poll(&mut self) -> Result<Option<Fragment<'a, CHUNK_SIZE>>, TangoError> {
         let seq = self.next_seq;
         match self.mcache.try_read(seq) {
@@ -1115,6 +1125,7 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
     /// - `Ok(Some(fragment))` if a fragment was received
     /// - `Ok(None)` if the mcache was stopped
     /// - `Err(TangoError::Overrun)` if the consumer was lapped
+    #[must_use = "waiting may return data or an error; check the result"]
     pub fn wait(&mut self) -> Result<Option<Fragment<'a, CHUNK_SIZE>>, TangoError> {
         let seq = self.next_seq;
         match self.mcache.wait(seq) {
@@ -1186,6 +1197,72 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
             }
         }
         Ok(fragments)
+    }
+
+}
+
+impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: usize> IntoIterator
+    for Consumer<'a, MCACHE_DEPTH, CHUNK_COUNT, CHUNK_SIZE>
+{
+    type Item = Result<Fragment<'a, CHUNK_SIZE>, TangoError>;
+    type IntoIter = ConsumerIter<'a, MCACHE_DEPTH, CHUNK_COUNT, CHUNK_SIZE>;
+
+    /// Convert this consumer into an iterator that busy-waits for messages.
+    ///
+    /// The iterator yields `Result<Fragment, TangoError>` and will:
+    /// - Yield `Ok(fragment)` for each successfully consumed message
+    /// - Yield `Err(TangoError::Overrun)` if the consumer was lapped
+    /// - Return `None` when the MCache is stopped
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// for result in consumer {
+    ///     match result {
+    ///         Ok(fragment) => println!("Got: {:?}", fragment.payload.as_slice()),
+    ///         Err(e) => eprintln!("Error: {}", e),
+    ///     }
+    /// }
+    /// ```
+    fn into_iter(self) -> Self::IntoIter {
+        ConsumerIter { consumer: self }
+    }
+}
+
+/// An iterator over fragments from a [`Consumer`].
+///
+/// Created by [`Consumer::into_iter`]. This iterator busy-waits for messages
+/// and yields `Result<Fragment, TangoError>`.
+pub struct ConsumerIter<
+    'a,
+    const MCACHE_DEPTH: usize,
+    const CHUNK_COUNT: usize,
+    const CHUNK_SIZE: usize,
+> {
+    consumer: Consumer<'a, MCACHE_DEPTH, CHUNK_COUNT, CHUNK_SIZE>,
+}
+
+impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: usize> fmt::Debug
+    for ConsumerIter<'a, MCACHE_DEPTH, CHUNK_COUNT, CHUNK_SIZE>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConsumerIter")
+            .field("consumer", &self.consumer)
+            .finish()
+    }
+}
+
+impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: usize> Iterator
+    for ConsumerIter<'a, MCACHE_DEPTH, CHUNK_COUNT, CHUNK_SIZE>
+{
+    type Item = Result<Fragment<'a, CHUNK_SIZE>, TangoError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.consumer.wait() {
+            Ok(Some(fragment)) => Some(Ok(fragment)),
+            Ok(None) => None, // MCache stopped
+            Err(e) => Some(Err(e)),
+        }
     }
 }
 
@@ -1261,6 +1338,7 @@ impl<const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: usiz
     /// - `Fseq` - the sequence counter
     /// - `Option<Fctl>` - flow control (if enabled)
     /// - `Option<Metrics>` - metrics (if enabled)
+    #[must_use = "this returns the channel components that should be used"]
     pub fn build(
         self,
     ) -> (
