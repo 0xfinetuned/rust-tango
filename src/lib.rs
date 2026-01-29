@@ -59,7 +59,7 @@
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C, align(16))]
@@ -90,6 +90,21 @@ pub enum TangoError {
     DcacheFull,
     #[error("chunk index {0} out of range")]
     ChunkOutOfRange(u32),
+    #[error("consumer overrun: producer lapped the consumer")]
+    Overrun,
+    #[error("no credits available for backpressure")]
+    NoCredits,
+}
+
+/// Result of attempting to read from the MCache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadResult<T> {
+    /// Successfully read the data.
+    Ok(T),
+    /// The sequence number has not been published yet.
+    NotReady,
+    /// The consumer was too slow and the slot was overwritten.
+    Overrun,
 }
 
 /// Command-and-control state for coordinating threads.
@@ -113,6 +128,12 @@ impl CncState {
 #[derive(Debug)]
 pub struct Cnc {
     state: AtomicU8,
+}
+
+impl Default for Cnc {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Cnc {
@@ -202,6 +223,12 @@ pub struct Tcache<const WORDS: usize> {
     mask: u64,
 }
 
+impl<const WORDS: usize> Default for Tcache<WORDS> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const WORDS: usize> Tcache<WORDS> {
     const BIT_COUNT: usize = WORDS * 64;
     const ASSERT_POWER_OF_TWO: () = assert!(is_power_of_two(Self::BIT_COUNT));
@@ -231,18 +258,43 @@ impl<const WORDS: usize> Tcache<WORDS> {
     }
 }
 
-#[derive(Debug)]
+/// Cache line size for padding to prevent false sharing.
+const CACHE_LINE_SIZE: usize = 64;
+
+/// A single entry in the MCache ring buffer.
+///
+/// Layout is carefully designed to prevent false sharing:
+/// - `seq` is on its own cache line (read by consumer, written by producer)
+/// - `meta` is on a separate cache line (written by producer, read by consumer)
+#[repr(C, align(64))]
 struct MCacheEntry {
+    /// Sequence number - atomically updated by producer, read by consumer.
     seq: AtomicU64,
+    /// Padding to push metadata to a separate cache line.
+    _pad: [u8; CACHE_LINE_SIZE - size_of::<AtomicU64>()],
+    /// Fragment metadata - written by producer before seq update.
     meta: UnsafeCell<FragmentMetadata>,
 }
 
+impl fmt::Debug for MCacheEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MCacheEntry")
+            .field("seq", &self.seq.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+// SAFETY: MCacheEntry is Sync because:
+// - `seq` is atomic and provides synchronization
+// - `meta` is only written before `seq` is updated (Release) and read after
+//   `seq` is loaded (Acquire), establishing a happens-before relationship
 unsafe impl Sync for MCacheEntry {}
 
 impl MCacheEntry {
     fn new() -> Self {
         Self {
             seq: AtomicU64::new(0),
+            _pad: [0u8; CACHE_LINE_SIZE - size_of::<AtomicU64>()],
             meta: UnsafeCell::new(FragmentMetadata::default()),
         }
     }
@@ -253,6 +305,12 @@ pub struct MCache<const DEPTH: usize> {
     mask: u64,
     entries: [MCacheEntry; DEPTH],
     running: AtomicBool,
+}
+
+impl<const DEPTH: usize> Default for MCache<DEPTH> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<const DEPTH: usize> MCache<DEPTH> {
@@ -287,38 +345,72 @@ impl<const DEPTH: usize> MCache<DEPTH> {
     }
 
     /// Busy-wait for a specific sequence number to appear.
-    pub fn wait(&self, seq: u64) -> Option<FragmentMetadata> {
+    ///
+    /// Returns:
+    /// - `ReadResult::Ok(meta)` if the sequence was successfully read
+    /// - `ReadResult::Overrun` if the consumer was lapped by the producer
+    /// - `ReadResult::NotReady` if the mcache was stopped before the sequence appeared
+    pub fn wait(&self, seq: u64) -> ReadResult<FragmentMetadata> {
         while self.is_running() {
-            if let Some(meta) = self.try_read(seq) {
-                return Some(meta);
+            match self.try_read(seq) {
+                ReadResult::Ok(meta) => return ReadResult::Ok(meta),
+                ReadResult::Overrun => return ReadResult::Overrun,
+                ReadResult::NotReady => std::hint::spin_loop(),
             }
-            std::hint::spin_loop();
         }
-        None
+        ReadResult::NotReady
     }
 
     /// Attempt a lock-free read of the metadata at a specific sequence.
-    pub fn try_read(&self, seq: u64) -> Option<FragmentMetadata> {
+    ///
+    /// Returns:
+    /// - `ReadResult::Ok(meta)` if the sequence was successfully read
+    /// - `ReadResult::NotReady` if the sequence has not been published yet
+    /// - `ReadResult::Overrun` if the consumer was lapped by the producer
+    pub fn try_read(&self, seq: u64) -> ReadResult<FragmentMetadata> {
         let idx = (seq & self.mask) as usize;
         let entry = &self.entries[idx];
+
         let seq_before = entry.seq.load(Ordering::Acquire);
+
+        // Not published yet
         if seq_before < seq {
-            return None;
+            return ReadResult::NotReady;
         }
-        if seq_before == seq {
-            let meta = unsafe { *entry.meta.get() };
-            let seq_after = entry.seq.load(Ordering::Acquire);
-            if seq_before == seq_after {
-                return Some(meta);
-            }
+
+        // Slot has been overwritten - consumer was too slow
+        if seq_before > seq {
+            return ReadResult::Overrun;
         }
-        None
+
+        // seq_before == seq: attempt to read
+        // SAFETY: The Acquire load above synchronizes with the Release store
+        // in publish(), ensuring we see the complete metadata write.
+        let meta = unsafe { *entry.meta.get() };
+
+        // Double-check the sequence hasn't changed during our read
+        let seq_after = entry.seq.load(Ordering::Acquire);
+        if seq_before == seq_after {
+            ReadResult::Ok(meta)
+        } else {
+            // Producer overwrote while we were reading
+            ReadResult::Overrun
+        }
     }
 }
 
-#[derive(Debug)]
+/// A single chunk in the DCache.
+#[repr(C, align(64))]
 struct DcacheChunk<const CHUNK_SIZE: usize> {
     data: UnsafeCell<[u8; CHUNK_SIZE]>,
+}
+
+impl<const CHUNK_SIZE: usize> fmt::Debug for DcacheChunk<CHUNK_SIZE> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DcacheChunk")
+            .field("size", &CHUNK_SIZE)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<const CHUNK_SIZE: usize> DcacheChunk<CHUNK_SIZE> {
@@ -329,6 +421,9 @@ impl<const CHUNK_SIZE: usize> DcacheChunk<CHUNK_SIZE> {
     }
 }
 
+// SAFETY: DcacheChunk is Sync because access is synchronized through the
+// MCache sequence protocol - writes happen before sequence update (Release),
+// reads happen after sequence load (Acquire).
 unsafe impl<const CHUNK_SIZE: usize> Sync for DcacheChunk<CHUNK_SIZE> {}
 
 #[derive(Debug, Clone, Copy)]
@@ -352,25 +447,48 @@ impl<'a, const CHUNK_SIZE: usize> DcacheView<'a, CHUNK_SIZE> {
 #[derive(Debug)]
 pub struct DCache<const CHUNK_COUNT: usize, const CHUNK_SIZE: usize> {
     chunks: [DcacheChunk<CHUNK_SIZE>; CHUNK_COUNT],
-    next: AtomicU32,
+    next: AtomicU64,
+    mask: u64,
+}
+
+const _: () = {
+    // DCache CHUNK_COUNT must be a power of two for ring buffer masking
+    // This is checked at runtime in new() via the same pattern as MCache
+};
+
+impl<const CHUNK_COUNT: usize, const CHUNK_SIZE: usize> Default for DCache<CHUNK_COUNT, CHUNK_SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<const CHUNK_COUNT: usize, const CHUNK_SIZE: usize> DCache<CHUNK_COUNT, CHUNK_SIZE> {
+    const ASSERT_POWER_OF_TWO: () = assert!(is_power_of_two(CHUNK_COUNT));
+
     /// Create a fixed-size cache of payload chunks.
+    ///
+    /// CHUNK_COUNT must be a power of two.
     pub fn new() -> Self {
+        let _ = Self::ASSERT_POWER_OF_TWO;
         Self {
             chunks: std::array::from_fn(|_| DcacheChunk::new()),
-            next: AtomicU32::new(0),
+            next: AtomicU64::new(0),
+            mask: (CHUNK_COUNT - 1) as u64,
         }
     }
 
-    /// Allocate a chunk index for a new payload.
-    pub fn allocate(&self) -> Result<u32, TangoError> {
-        let idx = self.next.fetch_add(1, Ordering::AcqRel) as usize;
-        if idx >= CHUNK_COUNT {
-            return Err(TangoError::DcacheFull);
-        }
-        Ok(idx as u32)
+    /// Allocate a chunk index for a new payload (ring buffer style).
+    ///
+    /// This wraps around, so callers must use flow control (Fctl) to ensure
+    /// chunks are not overwritten before consumers are done with them.
+    pub fn allocate(&self) -> u32 {
+        let seq = self.next.fetch_add(1, Ordering::AcqRel);
+        (seq & self.mask) as u32
+    }
+
+    /// Returns the number of chunks in the cache.
+    pub fn capacity(&self) -> usize {
+        CHUNK_COUNT
     }
 
     /// Write payload bytes into a chunk, truncating to the chunk size.
@@ -419,13 +537,16 @@ pub struct Producer<
     mcache: &'a MCache<MCACHE_DEPTH>,
     dcache: &'a DCache<CHUNK_COUNT, CHUNK_SIZE>,
     fseq: &'a Fseq,
+    fctl: Option<&'a Fctl>,
 }
 
 impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: usize> fmt::Debug
     for Producer<'a, MCACHE_DEPTH, CHUNK_COUNT, CHUNK_SIZE>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Producer").finish()
+        f.debug_struct("Producer")
+            .field("has_flow_control", &self.fctl.is_some())
+            .finish()
     }
 }
 
@@ -433,6 +554,9 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
     Producer<'a, MCACHE_DEPTH, CHUNK_COUNT, CHUNK_SIZE>
 {
     /// Create a producer for a shared mcache/dcache pair.
+    ///
+    /// Without flow control, this producer will freely overwrite chunks.
+    /// Use `with_flow_control` for backpressure.
     pub fn new(
         mcache: &'a MCache<MCACHE_DEPTH>,
         dcache: &'a DCache<CHUNK_COUNT, CHUNK_SIZE>,
@@ -442,10 +566,32 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
             mcache,
             dcache,
             fseq,
+            fctl: None,
+        }
+    }
+
+    /// Create a producer with credit-based flow control.
+    ///
+    /// The producer will acquire a credit before allocating a chunk.
+    /// Initialize `fctl` with `CHUNK_COUNT` credits.
+    pub fn with_flow_control(
+        mcache: &'a MCache<MCACHE_DEPTH>,
+        dcache: &'a DCache<CHUNK_COUNT, CHUNK_SIZE>,
+        fseq: &'a Fseq,
+        fctl: &'a Fctl,
+    ) -> Self {
+        Self {
+            mcache,
+            dcache,
+            fseq,
+            fctl: Some(fctl),
         }
     }
 
     /// Publish a payload fragment and its metadata.
+    ///
+    /// If flow control is enabled, returns `TangoError::NoCredits` when
+    /// no credits are available (consumer hasn't caught up).
     pub fn publish(
         &self,
         payload: &[u8],
@@ -453,8 +599,15 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
         ctl: u16,
         ts: u32,
     ) -> Result<FragmentMetadata, TangoError> {
+        // Acquire credit if flow control is enabled
+        if let Some(fctl) = self.fctl {
+            if !fctl.acquire(1) {
+                return Err(TangoError::NoCredits);
+            }
+        }
+
         let seq = self.fseq.next();
-        let chunk = self.dcache.allocate()?;
+        let chunk = self.dcache.allocate();
         let size = self.dcache.write_chunk(chunk, payload)? as u32;
         let meta = FragmentMetadata {
             seq,
@@ -467,6 +620,30 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
         };
         self.mcache.publish(meta);
         Ok(meta)
+    }
+
+    /// Try to publish, spinning until credits are available or mcache stops.
+    ///
+    /// Only useful when flow control is enabled.
+    pub fn publish_blocking(
+        &self,
+        payload: &[u8],
+        sig: u64,
+        ctl: u16,
+        ts: u32,
+    ) -> Result<FragmentMetadata, TangoError> {
+        loop {
+            match self.publish(payload, sig, ctl, ts) {
+                Ok(meta) => return Ok(meta),
+                Err(TangoError::NoCredits) => {
+                    if !self.mcache.is_running() {
+                        return Err(TangoError::NoCredits);
+                    }
+                    std::hint::spin_loop();
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
 
@@ -484,6 +661,7 @@ pub struct Consumer<
 > {
     mcache: &'a MCache<MCACHE_DEPTH>,
     dcache: &'a DCache<CHUNK_COUNT, CHUNK_SIZE>,
+    fctl: Option<&'a Fctl>,
     next_seq: u64,
 }
 
@@ -493,6 +671,7 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Consumer")
             .field("next_seq", &self.next_seq)
+            .field("has_flow_control", &self.fctl.is_some())
             .finish()
     }
 }
@@ -509,35 +688,92 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
         Self {
             mcache,
             dcache,
+            fctl: None,
+            next_seq: initial_seq,
+        }
+    }
+
+    /// Create a consumer with credit-based flow control.
+    ///
+    /// The consumer will release a credit after consuming each fragment.
+    /// Use the same `fctl` instance as the producer.
+    pub fn with_flow_control(
+        mcache: &'a MCache<MCACHE_DEPTH>,
+        dcache: &'a DCache<CHUNK_COUNT, CHUNK_SIZE>,
+        fctl: &'a Fctl,
+        initial_seq: u64,
+    ) -> Self {
+        Self {
+            mcache,
+            dcache,
+            fctl: Some(fctl),
             next_seq: initial_seq,
         }
     }
 
     /// Poll for the next fragment without blocking.
+    ///
+    /// Returns:
+    /// - `Ok(Some(fragment))` if a fragment was available
+    /// - `Ok(None)` if the sequence is not ready yet
+    /// - `Err(TangoError::Overrun)` if the consumer was lapped
     pub fn poll(&mut self) -> Result<Option<Fragment<'a, CHUNK_SIZE>>, TangoError> {
         let seq = self.next_seq;
-        let Some(meta) = self.mcache.try_read(seq) else {
-            return Ok(None);
-        };
-        let payload = self.dcache.read_chunk(meta.chunk, meta.size as usize)?;
-        self.next_seq = seq + 1;
-        Ok(Some(Fragment { meta, payload }))
+        match self.mcache.try_read(seq) {
+            ReadResult::Ok(meta) => {
+                let payload = self.dcache.read_chunk(meta.chunk, meta.size as usize)?;
+                self.next_seq = seq + 1;
+
+                // Release credit after consuming
+                if let Some(fctl) = self.fctl {
+                    fctl.release(1);
+                }
+
+                Ok(Some(Fragment { meta, payload }))
+            }
+            ReadResult::NotReady => Ok(None),
+            ReadResult::Overrun => Err(TangoError::Overrun),
+        }
     }
 
     /// Busy-wait for the next fragment.
+    ///
+    /// Returns:
+    /// - `Ok(Some(fragment))` if a fragment was received
+    /// - `Ok(None)` if the mcache was stopped
+    /// - `Err(TangoError::Overrun)` if the consumer was lapped
     pub fn wait(&mut self) -> Result<Option<Fragment<'a, CHUNK_SIZE>>, TangoError> {
         let seq = self.next_seq;
-        let Some(meta) = self.mcache.wait(seq) else {
-            return Ok(None);
-        };
-        let payload = self.dcache.read_chunk(meta.chunk, meta.size as usize)?;
-        self.next_seq = seq + 1;
-        Ok(Some(Fragment { meta, payload }))
+        match self.mcache.wait(seq) {
+            ReadResult::Ok(meta) => {
+                let payload = self.dcache.read_chunk(meta.chunk, meta.size as usize)?;
+                self.next_seq = seq + 1;
+
+                // Release credit after consuming
+                if let Some(fctl) = self.fctl {
+                    fctl.release(1);
+                }
+
+                Ok(Some(Fragment { meta, payload }))
+            }
+            ReadResult::NotReady => Ok(None),
+            ReadResult::Overrun => Err(TangoError::Overrun),
+        }
     }
 
     /// Return the next sequence number the consumer expects.
     pub fn next_seq(&self) -> u64 {
         self.next_seq
+    }
+
+    /// Manually release credits (useful for batch processing).
+    ///
+    /// Call this after you're done processing a batch of fragments
+    /// if you want to delay credit release for better throughput.
+    pub fn release_credits(&self, count: u64) {
+        if let Some(fctl) = self.fctl {
+            fctl.release(count);
+        }
     }
 }
 
@@ -548,7 +784,7 @@ mod tests {
     use std::thread;
 
     const MCACHE_DEPTH: usize = 8;
-    const CHUNK_COUNT: usize = 4;
+    const CHUNK_COUNT: usize = 8;
     const CHUNK_SIZE: usize = 64;
 
     #[test]
@@ -568,6 +804,64 @@ mod tests {
     }
 
     #[test]
+    fn publish_and_consume_with_flow_control() {
+        let mcache = MCache::<MCACHE_DEPTH>::new();
+        let dcache = DCache::<CHUNK_COUNT, CHUNK_SIZE>::new();
+        let fseq = Fseq::new(1);
+        let fctl = Fctl::new(CHUNK_COUNT as u64);
+
+        let producer = Producer::with_flow_control(&mcache, &dcache, &fseq, &fctl);
+        let mut consumer = Consumer::with_flow_control(&mcache, &dcache, &fctl, 1);
+
+        // Should be able to publish up to CHUNK_COUNT messages
+        for i in 0..CHUNK_COUNT {
+            producer
+                .publish(b"test", i as u64, 0, 0)
+                .expect("publish should succeed");
+        }
+
+        // Next publish should fail - no credits
+        assert!(matches!(
+            producer.publish(b"fail", 0, 0, 0),
+            Err(TangoError::NoCredits)
+        ));
+
+        // Consume one message - releases a credit
+        let _ = consumer.poll().expect("poll").expect("fragment");
+
+        // Now we can publish again
+        producer
+            .publish(b"success", 0, 0, 0)
+            .expect("publish should succeed after credit release");
+    }
+
+    #[test]
+    fn detect_overrun() {
+        let mcache = MCache::<4>::new();
+        let dcache = DCache::<8, 64>::new();
+        let fseq = Fseq::new(1);
+
+        let producer = Producer::new(&mcache, &dcache, &fseq);
+        let mut consumer = Consumer::new(&mcache, &dcache, 1);
+
+        // Publish more messages than mcache depth, causing overwrite
+        for i in 0..8u64 {
+            producer.publish(b"msg", i, 0, 0).expect("publish");
+        }
+
+        // Consumer at seq=1 should detect overrun (slot was overwritten)
+        assert!(matches!(consumer.poll(), Err(TangoError::Overrun)));
+    }
+
+    #[test]
+    fn read_result_not_ready() {
+        let mcache = MCache::<8>::new();
+
+        // Try to read seq=1 before anything is published
+        assert!(matches!(mcache.try_read(1), ReadResult::NotReady));
+    }
+
+    #[test]
     fn publish_and_consume_across_threads() {
         let mcache = MCache::<64>::new();
         let dcache = DCache::<64, 64>::new();
@@ -580,13 +874,15 @@ mod tests {
             scope.spawn(|| {
                 let mut consumer = consumer;
                 while received.load(Ordering::Acquire) < 3 {
-                    if let Some(fragment) = consumer.poll().expect("poll") {
-                        let payload = fragment.payload.read();
-                        println!("received: {:?}", String::from_utf8_lossy(&payload));
-                        assert!(payload.starts_with(b"msg-"));
-                        received.fetch_add(1, Ordering::AcqRel);
-                    } else {
-                        thread::yield_now();
+                    match consumer.poll() {
+                        Ok(Some(fragment)) => {
+                            let payload = fragment.payload.read();
+                            println!("received: {:?}", String::from_utf8_lossy(&payload));
+                            assert!(payload.starts_with(b"msg-"));
+                            received.fetch_add(1, Ordering::AcqRel);
+                        }
+                        Ok(None) => thread::yield_now(),
+                        Err(e) => panic!("unexpected error: {}", e),
                     }
                 }
             });
@@ -602,5 +898,43 @@ mod tests {
         });
 
         assert_eq!(received.load(Ordering::Acquire), 3);
+    }
+
+    #[test]
+    fn flow_control_across_threads() {
+        let mcache = MCache::<64>::new();
+        let dcache = DCache::<64, 64>::new();
+        let fseq = Fseq::new(1);
+        let fctl = Fctl::new(64);
+
+        let producer = Producer::with_flow_control(&mcache, &dcache, &fseq, &fctl);
+        let consumer = Consumer::with_flow_control(&mcache, &dcache, &fctl, 1);
+        let received = AtomicUsize::new(0);
+
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut consumer = consumer;
+                while received.load(Ordering::Acquire) < 100 {
+                    match consumer.poll() {
+                        Ok(Some(_)) => {
+                            received.fetch_add(1, Ordering::AcqRel);
+                        }
+                        Ok(None) => thread::yield_now(),
+                        Err(e) => panic!("unexpected error: {}", e),
+                    }
+                }
+            });
+
+            scope.spawn(|| {
+                for i in 0..100u32 {
+                    // Use blocking publish since consumer might be slow
+                    producer
+                        .publish_blocking(b"test", i as u64, 0, i)
+                        .expect("publish");
+                }
+            });
+        });
+
+        assert_eq!(received.load(Ordering::Acquire), 100);
     }
 }
