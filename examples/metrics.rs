@@ -2,9 +2,9 @@
 //!
 //! Run with: cargo run --example metrics
 
+use rust_tango::{Consumer, DCache, Fctl, Fseq, MCache, Metrics, Producer};
 use std::thread;
 use std::time::Duration;
-use rust_tango::{Consumer, DCache, Fctl, Fseq, MCache, Metrics, Producer};
 
 fn main() {
     // Create channel with metrics

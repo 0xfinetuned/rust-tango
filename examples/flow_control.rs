@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo run --example flow_control
 
-use std::thread;
 use rust_tango::{Consumer, DCache, Fctl, Fseq, MCache, Producer};
+use std::thread;
 
 fn main() {
     // Create channel components with flow control
