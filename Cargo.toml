@@ -1,5 +1,5 @@
 [package]
-name = "tango"
+name = "rust-tango"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -7,7 +7,7 @@ description = "A lock-free, high-performance IPC channel inspired by Firedancer'
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/0xfinetuned/rust-tango"
 homepage = "https://github.com/0xfinetuned/rust-tango"
-documentation = "https://docs.rs/tango"
+documentation = "https://docs.rs/rust-tango"
 readme = "README.md"
 keywords = ["lock-free", "channel", "ipc", "spsc", "zero-copy"]
 categories = ["concurrency", "data-structures", "no-std"]

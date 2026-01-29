@@ -1,9 +1,9 @@
 # tango
 
-[![Crates.io](https://img.shields.io/crates/v/tango.svg)](https://crates.io/crates/tango)
-[![Documentation](https://docs.rs/tango/badge.svg)](https://docs.rs/tango)
+[![Crates.io](https://img.shields.io/crates/v/rust-tango.svg)](https://crates.io/crates/rust-tango)
+[![Documentation](https://docs.rs/rust-tango/badge.svg)](https://docs.rs/rust-tango)
 [![CI](https://github.com/0xfinetuned/rust-tango/actions/workflows/ci.yml/badge.svg)](https://github.com/0xfinetuned/rust-tango/actions/workflows/ci.yml)
-[![License](https://img.shields.io/crates/l/tango.svg)](https://github.com/0xfinetuned/rust-tango#license)
+[![License](https://img.shields.io/crates/l/rust-tango.svg)](https://github.com/0xfinetuned/rust-tango#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://github.com/0xfinetuned/rust-tango)
 
 A lock-free, high-performance SPSC (single-producer single-consumer) channel inspired by [Firedancer's Tango](https://github.com/firedancer-io/firedancer) IPC subsystem.
@@ -143,7 +143,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tango = "0.1"
+rust-tango = "0.1"
 ```
 
 ## Feature Flags
@@ -156,7 +156,7 @@ tango = "0.1"
 For `no_std` environments:
 ```toml
 [dependencies]
-tango = { version = "0.1", default-features = false }
+rust-tango = { version = "0.1", default-features = false }
 ```
 
 ## Architecture
