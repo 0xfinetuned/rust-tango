@@ -6,6 +6,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use ringbuf::traits::{Consumer as RingConsumer, Producer as RingProducer, Split};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use tango::{Consumer, DCache, Fseq, MCache, Producer};
 
@@ -544,11 +545,12 @@ fn bench_latency(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_spsc_throughput,
-    bench_payload_sizes,
-    bench_single_thread_overhead,
-    bench_latency,
-);
+criterion_group! {
+    name = benches;
+    config = Criterion::default()
+        .sample_size(1000)
+        .measurement_time(Duration::from_secs(10))
+        .warm_up_time(Duration::from_secs(5));
+    targets = bench_spsc_throughput, bench_payload_sizes, bench_single_thread_overhead, bench_latency
+}
 criterion_main!(benches);

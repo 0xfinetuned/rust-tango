@@ -34,8 +34,8 @@ fn main() {
 
         // Consumer thread
         let consumer_handle = s.spawn(|| {
-            let mut consumer = Consumer::with_flow_control(&mcache, &dcache, &fctl, 1)
-                .with_metrics(&metrics);
+            let mut consumer =
+                Consumer::with_flow_control(&mcache, &dcache, &fctl, 1).with_metrics(&metrics);
             let mut count = 0;
 
             while count < 50 {
@@ -53,8 +53,8 @@ fn main() {
 
         // Producer thread
         let producer_handle = s.spawn(|| {
-            let producer = Producer::with_flow_control(&mcache, &dcache, &fseq, &fctl)
-                .with_metrics(&metrics);
+            let producer =
+                Producer::with_flow_control(&mcache, &dcache, &fseq, &fctl).with_metrics(&metrics);
 
             for i in 0..50 {
                 let payload = format!("message-{}", i);

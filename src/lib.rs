@@ -89,13 +89,13 @@
 //!
 //! # Performance Characteristics
 //!
-//! Benchmarked on Apple M3 Pro (10K messages, 64-byte payload):
+//! Benchmarked on Apple M3 Pro (1000 samples, 10K messages, 64-byte payload):
 //!
 //! | Scenario | Tango | std | crossbeam | ringbuf |
 //! |----------|-------|-----|-----------|---------|
-//! | SPSC throughput | **28.7M msg/s** | 11.5M msg/s | 7.2M msg/s | 10.7M msg/s |
-//! | Ping-pong latency (100 trips) | **88 µs** | 388 µs | 123 µs | 100 µs |
-//! | Large payload (1KB) | **12.6 GiB/s** | - | 6.6 GiB/s | 9.2 GiB/s |
+//! | SPSC throughput | **26.6M msg/s** | 9.1M msg/s | 7.3M msg/s | 10.7M msg/s |
+//! | Ping-pong latency (100 trips) | **90 µs** | 380 µs | 105 µs | 100 µs |
+//! | Large payload (1KB) | **12.4 GiB/s** | - | 6.9 GiB/s | 9.4 GiB/s |
 //!
 //! Best suited for:
 //! - Single-producer single-consumer scenarios
@@ -1198,7 +1198,6 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
         }
         Ok(fragments)
     }
-
 }
 
 impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: usize> IntoIterator
@@ -1285,8 +1284,11 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
 /// let mut consumer = Consumer::with_flow_control(&mcache, &dcache, fctl.as_ref().unwrap(), 1);
 /// ```
 #[derive(Debug)]
-pub struct ChannelBuilder<const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: usize>
-{
+pub struct ChannelBuilder<
+    const MCACHE_DEPTH: usize,
+    const CHUNK_COUNT: usize,
+    const CHUNK_SIZE: usize,
+> {
     initial_seq: u64,
     flow_control: bool,
     metrics: bool,

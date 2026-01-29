@@ -24,8 +24,8 @@ fn main() {
             while count < 20 {
                 match consumer.poll() {
                     Ok(Some(fragment)) => {
-                        let payload = std::str::from_utf8(fragment.payload.as_slice())
-                            .unwrap_or("<invalid>");
+                        let payload =
+                            std::str::from_utf8(fragment.payload.as_slice()).unwrap_or("<invalid>");
                         println!(
                             "  Consumer: received seq={} \"{}\" (credits available: {})",
                             fragment.meta.seq,

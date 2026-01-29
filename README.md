@@ -4,35 +4,35 @@ A lock-free, high-performance SPSC (single-producer single-consumer) channel ins
 
 ## Performance
 
-Benchmarked on Apple M3 Pro, comparing against popular Rust channel implementations:
+Benchmarked on Apple M3 Pro with 1000 samples per benchmark:
 
 ### SPSC Throughput (10K messages, 64-byte payload)
 
 | Channel | Throughput | Relative |
 |---------|-----------|----------|
-| **tango** | **28.7 M msg/s** | **1.0x** |
-| ringbuf | 10.7 M msg/s | 2.7x slower |
-| std bounded | 11.5 M msg/s | 2.5x slower |
-| std unbounded | 9.0 M msg/s | 3.2x slower |
-| crossbeam bounded | 7.2 M msg/s | 4.0x slower |
-| crossbeam unbounded | 6.8 M msg/s | 4.2x slower |
+| **tango** | **26.6 M msg/s** | **1.0x** |
+| ringbuf | 10.7 M msg/s | 2.5x slower |
+| std unbounded | 9.1 M msg/s | 2.9x slower |
+| std bounded | 9.0 M msg/s | 3.0x slower |
+| crossbeam bounded | 7.3 M msg/s | 3.6x slower |
+| crossbeam unbounded | 6.8 M msg/s | 3.9x slower |
 
 ### Ping-Pong Latency (100 round trips, 8-byte payload)
 
 | Channel | Latency | Relative |
 |---------|---------|----------|
-| **tango** | **88 µs** | **1.0x** |
+| **tango** | **90 µs** | **1.0x** |
 | ringbuf | 100 µs | 1.1x slower |
-| crossbeam | 123 µs | 1.4x slower |
-| std | 388 µs | 4.4x slower |
+| crossbeam | 105 µs | 1.2x slower |
+| std | 380 µs | 4.2x slower |
 
 ### Large Payload Throughput (2K messages, 1024-byte payload)
 
 | Channel | Throughput | Relative |
 |---------|-----------|----------|
-| **tango** | **12.6 GiB/s** | **1.0x** |
-| ringbuf | 9.2 GiB/s | 1.4x slower |
-| crossbeam | 6.6 GiB/s | 1.9x slower |
+| **tango** | **12.4 GiB/s** | **1.0x** |
+| ringbuf | 9.4 GiB/s | 1.3x slower |
+| crossbeam | 6.9 GiB/s | 1.8x slower |
 
 Run benchmarks yourself:
 ```bash
