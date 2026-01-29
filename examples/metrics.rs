@@ -4,7 +4,7 @@
 
 use std::thread;
 use std::time::Duration;
-use tango::{Consumer, DCache, Fctl, Fseq, MCache, Metrics, Producer};
+use rust_tango::{Consumer, DCache, Fctl, Fseq, MCache, Metrics, Producer};
 
 fn main() {
     // Create channel with metrics
@@ -61,7 +61,7 @@ fn main() {
                 // Use non-blocking publish to demonstrate backpressure counting
                 match producer.publish(payload.as_bytes(), i as u64, 0, 0) {
                     Ok(_) => {}
-                    Err(tango::TangoError::NoCredits) => {
+                    Err(rust_tango::TangoError::NoCredits) => {
                         // Wait and retry
                         thread::sleep(Duration::from_millis(5));
                         let _ = producer.publish_blocking(payload.as_bytes(), i as u64, 0, 0);

@@ -11,7 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 
-[dependencies.tango]
+[dependencies.rust-tango]
 path = ".."
 
 [[bin]]

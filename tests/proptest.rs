@@ -3,7 +3,7 @@
 //! Run with: cargo test --test proptest
 
 use proptest::prelude::*;
-use tango::{Consumer, DCache, Fctl, Fseq, MCache, Producer, TangoError};
+use rust_tango::{Consumer, DCache, Fctl, Fseq, MCache, Producer, TangoError};
 
 /// Generate arbitrary payloads up to a maximum size.
 fn payload_strategy(max_size: usize) -> impl Strategy<Value = Vec<u8>> {

@@ -24,7 +24,7 @@
 //! # Quick Start
 //!
 //! ```
-//! use tango::{Consumer, DCache, Fseq, MCache, Producer};
+//! use rust_tango::{Consumer, DCache, Fseq, MCache, Producer};
 //!
 //! // Create the channel components
 //! let mcache = MCache::<64>::new();      // 64-slot metadata ring buffer
@@ -48,7 +48,7 @@
 //! Use [`Fctl`] to prevent the producer from overwriting unconsumed messages:
 //!
 //! ```
-//! use tango::{Consumer, DCache, Fctl, Fseq, MCache, Producer};
+//! use rust_tango::{Consumer, DCache, Fctl, Fseq, MCache, Producer};
 //!
 //! let mcache = MCache::<64>::new();
 //! let dcache = DCache::<64, 256>::new();
@@ -67,7 +67,7 @@
 //! Track throughput, lag, and errors:
 //!
 //! ```
-//! use tango::{Consumer, DCache, Fseq, MCache, Metrics, Producer};
+//! use rust_tango::{Consumer, DCache, Fseq, MCache, Metrics, Producer};
 //!
 //! let mcache = MCache::<64>::new();
 //! let dcache = DCache::<64, 256>::new();
@@ -1270,7 +1270,7 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
 /// # Example
 ///
 /// ```
-/// use tango::ChannelBuilder;
+/// use rust_tango::ChannelBuilder;
 ///
 /// // Create channel components with the builder
 /// let (mcache, dcache, fseq, fctl, metrics) = ChannelBuilder::<64, 64, 256>::new()
@@ -1279,7 +1279,7 @@ impl<'a, const MCACHE_DEPTH: usize, const CHUNK_COUNT: usize, const CHUNK_SIZE: 
 ///     .build();
 ///
 /// // Create producer and consumer from the components
-/// use tango::{Producer, Consumer};
+/// use rust_tango::{Producer, Consumer};
 /// let producer = Producer::with_flow_control(&mcache, &dcache, &fseq, fctl.as_ref().unwrap());
 /// let mut consumer = Consumer::with_flow_control(&mcache, &dcache, fctl.as_ref().unwrap(), 1);
 /// ```

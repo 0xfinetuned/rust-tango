@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example basic
 
-use tango::{Consumer, DCache, Fseq, MCache, Producer};
+use rust_tango::{Consumer, DCache, Fseq, MCache, Producer};
 
 fn main() {
     // Create channel components

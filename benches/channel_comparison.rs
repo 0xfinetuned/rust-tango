@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use tango::{Consumer, DCache, Fseq, MCache, Producer};
+use rust_tango::{Consumer, DCache, Fseq, MCache, Producer};
 
 const MSG_COUNT: u64 = 10_000;
 const PAYLOAD_SIZE: usize = 64;

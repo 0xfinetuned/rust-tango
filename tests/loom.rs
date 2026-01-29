@@ -8,7 +8,7 @@
 use loom::sync::Arc;
 use loom::thread;
 
-use tango::{Fctl, Fseq, ReadResult};
+use rust_tango::{Fctl, Fseq, ReadResult};
 
 /// Test sequence counter is correctly incremented across threads.
 #[test]

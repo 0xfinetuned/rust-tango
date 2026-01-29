@@ -58,7 +58,7 @@ RUST_MIN_STACK=67108864 cargo bench
 ## Quick Start
 
 ```rust
-use tango::{Consumer, DCache, Fseq, MCache, Producer};
+use rust_tango::{Consumer, DCache, Fseq, MCache, Producer};
 
 // Create the channel components
 let mcache = MCache::<64>::new();      // 64-slot metadata ring buffer
@@ -82,7 +82,7 @@ if let Ok(Some(fragment)) = consumer.poll() {
 Use `Fctl` to prevent the producer from overwriting unconsumed messages:
 
 ```rust
-use tango::{Consumer, DCache, Fctl, Fseq, MCache, Producer};
+use rust_tango::{Consumer, DCache, Fctl, Fseq, MCache, Producer};
 
 let mcache = MCache::<64>::new();
 let dcache = DCache::<64, 256>::new();
@@ -101,7 +101,7 @@ let mut consumer = Consumer::with_flow_control(&mcache, &dcache, &fctl, 1);
 Track throughput, lag, and errors:
 
 ```rust
-use tango::{Consumer, DCache, Fseq, MCache, Metrics, Producer};
+use rust_tango::{Consumer, DCache, Fseq, MCache, Metrics, Producer};
 
 let mcache = MCache::<64>::new();
 let dcache = DCache::<64, 256>::new();
@@ -124,7 +124,7 @@ println!("Lag: {} messages", snapshot.lag());
 For ergonomic channel creation:
 
 ```rust
-use tango::{ChannelBuilder, Producer, Consumer};
+use rust_tango::{ChannelBuilder, Producer, Consumer};
 
 let (mcache, dcache, fseq, fctl, metrics) = ChannelBuilder::<64, 64, 256>::new()
     .with_flow_control()

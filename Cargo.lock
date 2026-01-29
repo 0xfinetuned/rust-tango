@@ -608,6 +608,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-tango"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "crossbeam-channel",
+ "loom",
+ "proptest",
+ "ringbuf",
+ "thiserror",
+]
+
+[[package]]
 name = "rustix"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -726,18 +738,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "tango"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "crossbeam-channel",
- "loom",
- "proptest",
- "ringbuf",
- "thiserror",
 ]
 
 [[package]]

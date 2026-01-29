@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use tango::{FragmentMetadata, MCache, ReadResult};
+use rust_tango::{FragmentMetadata, MCache, ReadResult};
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
