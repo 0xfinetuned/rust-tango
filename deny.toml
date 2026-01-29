@@ -1,5 +1,9 @@
-# cargo-deny configuration
+# cargo-deny configuration v2
 # https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+targets = []
+all-features = true
 
 [advisories]
 db-path = "~/.cargo/advisory-db"
@@ -7,7 +11,6 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 ignore = []
 
 [licenses]
-unlicensed = "deny"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -19,7 +22,6 @@ allow = [
     "Unicode-DFS-2016",
     "Zlib",
 ]
-copyleft = "warn"
 confidence-threshold = 0.8
 
 [bans]

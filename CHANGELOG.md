@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Release workflow now runs CI checks before publishing
 
+### Fixed
+
+- Update cargo-deny config to v2 format
+- Remove --allow-dirty from publish
+
 ## [0.1.1] - 2025-01-30
 
 ### Fixed
